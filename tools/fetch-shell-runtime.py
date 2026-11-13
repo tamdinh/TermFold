@@ -1,6 +1,10 @@
 """Stages PRoot + its loaders into jniLibs, and the Debian rootfs into assets.
 
 Run from the repo root:  py -3 tools/fetch-shell-runtime.py
+With ``--rootfs-only`` only the Debian images under assets/ are fetched. Use that on a checkout
+where jniLibs/ is already present (it is committed): the Termux pool prunes old package versions,
+so the pinned PRoot URLs can disappear, while the images are the only build input .gitignore
+excludes.
 
 Why this is done the way it is
 ------------------------------
@@ -222,6 +226,7 @@ def stage_rootfs():
 
 if __name__ == "__main__":
     os.makedirs(WORK, exist_ok=True)
-    stage_native()
+    if "--rootfs-only" not in sys.argv:
+        stage_native()
     stage_rootfs()
     print("done")

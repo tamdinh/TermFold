@@ -67,6 +67,7 @@ def data_tar(deb):
                 # package, which is worth avoiding as a build dependency.
                 try:
                     from compression import zstd
+                    return zstd.decompress(data)
                 except ImportError:
                     try:
                         import zstandard as zstd
@@ -74,7 +75,12 @@ def data_tar(deb):
                         raise SystemExit(
                             "unpacking data.tar.zst needs Python 3.14+ or `pip install zstandard`"
                         )
-                return zstd.decompress(data)
+                    # dpkg-deb does not record the uncompressed size in the frame header, and
+                    # zstandard's one-shot decompress() refuses such frames; the streaming
+                    # decompressor reads them. (The standard library's decompress() does not
+                    # have that restriction.)
+                    with zstd.ZstdDecompressor().stream_reader(io.BytesIO(data)) as reader:
+                        return reader.read()
             return data
     raise SystemExit("no data.tar in " + deb)
 

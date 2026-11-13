@@ -1,0 +1,85 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+# The build only reads the repository; nothing is published from here.
+permissions:
+  contents: read
+
+# A newer push to the same branch or PR makes the older run obsolete.
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      # tools/fetch-ca-bundle.py unpacks the newest ca-certificates package, whose payload is a
+      # data.tar.zst on current Ubuntu. The runner's python3 is older than 3.14, so it has no zstd
+      # in the standard library; provide the module the script falls back to. Harmless on 3.14+.
+      - name: Install Python zstd support
+        run: python3 -m pip install --user --break-system-packages zstandard
+
+      # jniLibs/ is committed, but the Debian images under assets/ and the CA bundle are
+      # .gitignore'd build inputs and must be fetched before the build. --rootfs-only skips the
+      # Termux package step: the upstream pool prunes old versions, so those pins can 404, and
+      # the committed PRoot binaries are what ship anyway. Keying the cache on the fetch script
+      # means a change to the pinned images or checksums automatically invalidates it.
+      - name: Cache fetched shell runtime
+        uses: actions/cache@v6
+        with:
+          path: .work
+          key: shell-runtime-${{ runner.os }}-${{ hashFiles('tools/fetch-shell-runtime.py') }}
+          restore-keys: |
+            shell-runtime-${{ runner.os }}-
+
+      - name: Fetch bundled shell runtime
+        run: |
+          python3 tools/fetch-shell-runtime.py --rootfs-only
+          python3 tools/fetch-ca-bundle.py
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      # TarExtractorTest reads the real Debian image, so this must run after the fetch step.
+      - name: Run unit tests
+        run: ./gradlew :app:testDebugUnitTest --stacktrace
+
+      # The release build is unsigned when no keystore is configured, which is exactly what
+      # app/build.gradle.kts supports for checkouts without the release key.
+      - name: Build debug and release APKs
+        run: ./gradlew :app:assembleDebug :app:assembleRelease --stacktrace
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: TermFold-debug
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      - name: Upload release APK (unsigned)
+        uses: actions/upload-artifact@v7
+        with:
+          name: TermFold-release-unsigned
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
