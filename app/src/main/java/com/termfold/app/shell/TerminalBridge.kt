@@ -8,6 +8,10 @@ import android.os.Looper
 import android.util.Log
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.View
+import android.view.inputmethod.InputMethodManager
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
 import com.termux.view.TerminalViewClient
@@ -176,8 +180,10 @@ class TerminalBridge(
     }
 
     /**
-     * Back acts as Escape while the terminal has focus. Without this, a TUI that expects Escape
-     * to close a menu is unusable on a phone.
+     * Routes Back through [onKeyDown] while the terminal has focus, before the IME or the system
+     * sees it. That is what lets [handleBackPress] decide whether this particular Back means
+     * "hide the soft keyboard" or "leave the screen"; Escape itself is sent by the on-screen ESC
+     * key and by physical Escape, so Back is not turned into Escape here.
      */
     override fun shouldBackButtonBeMappedToEscape(): Boolean = true
 
@@ -196,13 +202,12 @@ class TerminalBridge(
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent, session: TerminalSession): Boolean {
-        markInput()
         if (keyCode == KeyEvent.KEYCODE_BACK) {
-            // Back first gives the UI a chance to handle it (closing the keyboard, then leaving
-            // the screen); only if the UI declines does it fall through to Escape above.
-            main.post { host.onBackPressed() }
-            return false
+            // Key repeats must not queue several navigations or IME dismissals for one long press.
+            if (event.repeatCount > 0) return true
+            return handleBackPress()
         }
+        markInput()
         // Ctrl+V (and Ctrl+Shift+V) paste from Android's clipboard. The agents' own Ctrl+V reads
         // an X11/Wayland clipboard the guest does not have ("Failed to paste image: clipboard
         // unavailable" in Codex), so an image becomes a saved file whose path is pasted instead,
@@ -219,7 +224,48 @@ class TerminalBridge(
         return false
     }
 
-    override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean = false
+    /**
+     * Back arrives for two different user intentions: leaving the screen, and dismissing the soft
+     * keyboard. Android distinguishes them only by whether the IME is showing when the event is
+     * dispatched, so that is the check made here — a Back while the IME is up belongs to the IME,
+     * even though `TerminalView` (because Back is mapped to its client) hands it to us first.
+     *
+     * The event is consumed in both cases. Consuming it is what stops the framework (Compose's
+     * `BackHandler`) and the terminal's own key handling from acting on the same press a second
+     * time, and it keeps a keyboard dismissal from ever reaching [onBackPressed].
+     *
+     * [WindowInsetsCompat] is the reliable visibility source: API 30+ reports the IME directly,
+     * and on older releases it derives the IME insets from the root view's visible bounds, which
+     * is accurate here because the activity uses `adjustResize`.
+     */
+    private fun handleBackPress(): Boolean {
+        val view = TerminalHost.currentView
+        if (view != null && view.isImeVisible()) {
+            view.hideIme()
+        } else {
+            // No IME to dismiss: this is ordinary application navigation. Posting keeps the
+            // callback out of the key dispatch, where it would tear down the view mid-event.
+            main.post { host.onBackPressed() }
+        }
+        return true
+    }
+
+    private fun View.isImeVisible(): Boolean =
+        ViewCompat.getRootWindowInsets(this)
+            ?.isVisible(WindowInsetsCompat.Type.ime()) == true
+
+    private fun View.hideIme() {
+        runCatching {
+            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+            imm?.hideSoftInputFromWindow(windowToken, 0)
+        }
+    }
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean =
+        // Back was already fully handled on the way down, either by hiding the IME or by
+        // navigating. Swallowing the up event stops the Activity from treating the same press as
+        // a second back action; every other key is left to the terminal.
+        keyCode == KeyEvent.KEYCODE_BACK
 
     override fun onLongPress(event: MotionEvent): Boolean = false
 
