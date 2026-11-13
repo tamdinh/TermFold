@@ -34,6 +34,13 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
 
+      # compileSdk is pinned to 36; the action only installs platform-tools and cmdline-tools by
+      # default, so install the compile platform explicitly so manifest/resource processing can
+      # resolve the framework APIs the app references (e.g. @android:style/Theme.Material).
+      - name: Install Android SDK platform
+        run: |
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" >/dev/null
+
       # tools/fetch-ca-bundle.py unpacks the newest ca-certificates package, whose payload is a
       # data.tar.zst on current Ubuntu. The runner's python3 is older than 3.14, so it has no zstd
       # in the standard library; provide the module the script falls back to. Harmless on 3.14+.
